@@ -1,0 +1,15 @@
+[project]
+name = "ai-trader-frontend"
+version = "0.1.0"
+description = "Streamlit dashboard for Alpaca portfolio snapshots"
+requires-python = ">=3.10"
+dependencies = [
+  "alpaca-py>=0.30.0",
+  "pandas>=2.2.0",
+  "python-dateutil>=2.8.2",
+  "pytz>=2024.1",
+  "streamlit>=1.37.0",
+]
+
+[tool.uv]
+dev-dependencies = []

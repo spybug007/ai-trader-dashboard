@@ -1,0 +1,123 @@
+{
+  "updated_at_utc": "2025-10-30T17:52:44.866494Z",
+  "account": {
+    "id": "962036d7-c062-44cf-85a4-2ca89b5f4caa",
+    "status": "AccountStatus.ACTIVE",
+    "cash": 99729.18,
+    "buying_power": 199730.06,
+    "portfolio_value": 100000.88,
+    "last_equity": 100002.3
+  },
+  "positions": [
+    {
+      "symbol": "AAPL",
+      "qty": 1.0,
+      "avg_entry_price": 273.12,
+      "market_value": 271.7,
+      "unrealized_pl": -1.42,
+      "unrealized_plpc": -0.005199179847686
+    }
+  ],
+  "orders": [
+    {
+      "id": "23294553-bae9-48b4-9590-bfc9351beb54",
+      "symbol": "AAPL",
+      "side": "buy",
+      "qty": 1.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-30 12:28:55.811974+00:00",
+      "filled_at": "2025-10-30 13:30:39.893426+00:00"
+    },
+    {
+      "id": "1a2f0981-ba7b-4624-afc7-dc2b56df3168",
+      "symbol": "NVDA",
+      "side": "sell",
+      "qty": 5.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-23 19:21:53.439092+00:00",
+      "filled_at": "2025-10-23 19:21:53.904960+00:00"
+    },
+    {
+      "id": "7b06af2d-ba5c-4361-b2c0-9d0e77ef589a",
+      "symbol": "MSFT",
+      "side": "sell",
+      "qty": 5.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-23 19:21:49.451532+00:00",
+      "filled_at": "2025-10-23 19:21:50.039992+00:00"
+    },
+    {
+      "id": "bec40580-70ca-47b8-bdd7-a994da53ae8d",
+      "symbol": "AAPL",
+      "side": "sell",
+      "qty": 1.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-23 19:21:32.849787+00:00",
+      "filled_at": "2025-10-23 19:21:33.076035+00:00"
+    },
+    {
+      "id": "5f8d906e-067a-4048-a5f2-5ca1acab1938",
+      "symbol": "NVDA",
+      "side": "buy",
+      "qty": 5.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-23 18:43:51.707434+00:00",
+      "filled_at": "2025-10-23 18:43:52.396404+00:00"
+    },
+    {
+      "id": "416cf3db-1055-4da6-8582-4657a35666dc",
+      "symbol": "MSFT",
+      "side": "buy",
+      "qty": 5.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-23 13:29:15.642963+00:00",
+      "filled_at": "2025-10-23 13:30:23.465617+00:00"
+    },
+    {
+      "id": "5d1bcfd8-7c64-41a4-b645-fa959d410e61",
+      "symbol": "AAPL",
+      "side": "buy",
+      "qty": 1.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-22 19:22:13.540744+00:00",
+      "filled_at": "2025-10-22 19:22:14.100130+00:00"
+    },
+    {
+      "id": "ff9168db-e0c7-4c01-b928-6a87f8945bf9",
+      "symbol": "AAPL",
+      "side": "buy",
+      "qty": 1.0,
+      "type": "limit",
+      "status": "canceled",
+      "submitted_at": "2025-10-22 17:51:08.029093+00:00",
+      "filled_at": "None"
+    },
+    {
+      "id": "f53ac95f-f075-4870-b786-4e391b71450c",
+      "symbol": "AAPL",
+      "side": "sell",
+      "qty": 1.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-22 17:22:29.100844+00:00",
+      "filled_at": "2025-10-22 17:22:29.352972+00:00"
+    },
+    {
+      "id": "73790d0d-225e-4be6-854d-a57ac08c1d96",
+      "symbol": "AAPL",
+      "side": "buy",
+      "qty": 1.0,
+      "type": "market",
+      "status": "filled",
+      "submitted_at": "2025-10-22 17:21:51.380050+00:00",
+      "filled_at": "2025-10-22 17:21:51.741305+00:00"
+    }
+  ]
+}
