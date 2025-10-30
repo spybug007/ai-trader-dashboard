@@ -6,4 +6,5 @@ streamlit>=1.37.0
 streamlit
 pandas
 alpaca-py
+plotly
 
