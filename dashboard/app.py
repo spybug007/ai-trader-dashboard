@@ -1,8 +1,8 @@
 # dashboard/app.py
-# Streamlit dashboard for AI Trader (Paper/Live)
-# Requires: streamlit, pandas
+# AI Trader Dashboard — live (Alpaca) or local JSON fallback
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,42 +10,139 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-
-# -----------------------------
-# Config
-# -----------------------------
+# ---------- Page config ----------
 st.set_page_config(page_title="AI Trader Dashboard", layout="wide")
 
-# Where to look for data files produced by your jobs
+# Optional: lightweight auto-refresh (install streamlit-autorefresh to enable)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=15_000, key="autorfr")  # refresh every 15s
+except Exception:
+    pass
+
+# ---------- Optional timezone formatting ----------
+try:
+    import pytz
+except Exception:
+    pytz = None
+
+
+# ===============================
+# LIVE-FETCH FROM ALPACA (auto if secrets present)
+# ===============================
+def _get_secret(key: str, default: str | None = None) -> str | None:
+    """
+    Try Streamlit secrets first (on Streamlit Cloud), then environment variables.
+    """
+    try:
+        v = st.secrets.get(key)  # type: ignore[attr-defined]
+        if v is not None:
+            return str(v)
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+ALPACA_API_KEY = _get_secret("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = _get_secret("ALPACA_SECRET_KEY")
+ALPACA_PAPER = (_get_secret("ALPACA_PAPER", "true") or "true").lower() == "true"
+USE_ALPACA = bool(ALPACA_API_KEY and ALPACA_SECRET_KEY)
+
+if USE_ALPACA:
+    try:
+        from alpaca.trading.client import TradingClient
+    except Exception as e:
+        # If alpaca-py is missing, gracefully disable live mode
+        USE_ALPACA = False
+        st.warning(f"alpaca-py not found or failed to import ({e}). Falling back to JSON files.")
+
+def fetch_from_alpaca() -> tuple[dict, list[dict], list[dict]]:
+    """
+    Pull account, positions, and recent orders from Alpaca.
+    Returns (account_dict, positions_list[dict], orders_list[dict]).
+    """
+    client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+
+    # ---- Account
+    acc = client.get_account()
+    try:
+        day_pl = float(acc.equity or 0) - float(acc.last_equity or 0)
+    except Exception:
+        day_pl = 0.0
+
+    account = {
+        "cash": float(getattr(acc, "cash", 0) or 0),
+        "portfolio_value": float(getattr(acc, "portfolio_value", 0) or 0),
+        "buying_power": float(getattr(acc, "buying_power", 0) or 0),
+        "day_pl": day_pl,
+        "paper": ALPACA_PAPER,
+        "updated_at": getattr(acc, "updated_at", None) or getattr(acc, "last_update_at", None),
+    }
+
+    # ---- Positions
+    positions: List[dict] = []
+    try:
+        for p in client.get_all_positions():
+            positions.append({
+                "symbol": p.symbol,
+                "qty": p.qty,
+                "avg_entry_price": p.avg_entry_price,
+                "current_price": getattr(p, "current_price", None),
+                "market_value": p.market_value,
+                "unrealized_pl": p.unrealized_pl,
+                "unrealized_plpc": p.unrealized_plpc,
+            })
+    except Exception:
+        positions = []
+
+    # ---- Orders (latest 50)
+    orders: List[dict] = []
+    try:
+        for o in client.get_orders(status="all", limit=50):
+            orders.append({
+                "id": o.id,
+                "symbol": getattr(o, "symbol", None),
+                "side": getattr(o, "side", None),
+                "type": getattr(o, "type", None),
+                "qty": getattr(o, "qty", None),
+                "notional": getattr(o, "notional", None),
+                "limit_price": getattr(o, "limit_price", None),
+                "submitted_at": getattr(o, "submitted_at", None),
+                "filled_at": getattr(o, "filled_at", None),
+                "filled_qty": getattr(o, "filled_qty", None),
+                "status": getattr(o, "status", None),
+            })
+    except Exception:
+        orders = []
+
+    return account, positions, orders
+
+
+# ===============================
+# JSON fallback (file IO helpers)
+# ===============================
 CANDIDATE_DIRS = [
-    Path.cwd(),                             # current dir
-    Path.cwd() / "dashboard",               # ./dashboard
-    Path.cwd() / "dashboard" / "data",      # ./dashboard/data
-    Path.home() / "mcp" / "ai-trader-frontend" / "dashboard",       # ~/mcp/ai-trader-frontend/dashboard
+    Path.cwd(),
+    Path.cwd() / "dashboard",
+    Path.cwd() / "dashboard" / "data",
+    Path.home() / "mcp" / "ai-trader-frontend" / "dashboard",
     Path.home() / "mcp" / "ai-trader-frontend" / "dashboard" / "data",
 ]
-
-ACCOUNT_FILES = ["account.json", "data.json"]  # some projects save as data.json
+ACCOUNT_FILES = ["account.json", "data.json"]
 POSITIONS_FILES = ["positions.json"]
 ORDERS_FILES = ["orders.json"]
 
-
-# -----------------------------
-# IO helpers
-# -----------------------------
-def find_first_existing(candidates: List[Path]) -> Optional[Path]:
-    for p in candidates:
+def _find_first_existing(paths: List[Path]) -> Optional[Path]:
+    for p in paths:
         if p.exists():
             return p
     return None
 
-
-def load_json_from_candidates(names: List[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Path]]:
+def load_json_from_candidates(names: List[str]) -> tuple[Optional[Dict[str, Any]], Optional[Path]]:
     paths: List[Path] = []
     for d in CANDIDATE_DIRS:
         for name in names:
             paths.append(d / name)
-    found = find_first_existing(paths)
+    found = _find_first_existing(paths)
     if not found:
         return None, None
     try:
@@ -55,36 +152,25 @@ def load_json_from_candidates(names: List[str]) -> Tuple[Optional[Dict[str, Any]
         return None, found
 
 
-# -----------------------------
-# Normalizers
-# -----------------------------
+# ===============================
+# Normalizers & utils
+# ===============================
 def safe_to_datetime(series: pd.Series, utc: bool = True) -> pd.Series:
     try:
         return pd.to_datetime(series, errors="coerce", utc=utc, infer_datetime_format=True)
     except Exception:
         return pd.to_datetime(pd.Series([None] * len(series)), errors="coerce", utc=utc)
 
-
-def normalize_account(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Supports two shapes:
-    - Alpaca-like 'account' dict
-    - A custom 'data.json' with { 'account': {...}, 'positions': [...], 'orders': [...] }
-    """
-    if raw is None:
+def normalize_account(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not raw:
         return {}
+    acc = raw.get("account", raw) if isinstance(raw, dict) else raw
 
-    # unwrap if it's a container
-    if "account" in raw and isinstance(raw["account"], dict):
-        acc = raw["account"]
-    else:
-        acc = raw
-
-    # Normalize numeric fields if possible
     def fget(key: str, default=None):
         v = acc.get(key, default)
         if isinstance(v, str):
             try:
+                # try int or float with commas
                 if v.isdigit():
                     return int(v)
                 return float(v.replace(",", ""))
@@ -96,22 +182,19 @@ def normalize_account(raw: Dict[str, Any]) -> Dict[str, Any]:
         "cash": fget("cash", 0.0),
         "portfolio_value": fget("portfolio_value", fget("portfolioValue", 0.0)),
         "buying_power": fget("buying_power", fget("buyingPower", 0.0)),
-        "day_pl": fget("day_pl", fget("equity", 0.0)) if "day_pl" in acc else acc.get("day_pl", 0.0),
+        "day_pl": fget("day_pl", 0.0),
         "paper": bool(acc.get("paper", acc.get("is_paper", True))),
         "updated_at": acc.get("updated_at") or acc.get("timestamp") or acc.get("last_update_at"),
     }
 
-
 def normalize_positions(raw: Any) -> pd.DataFrame:
-    """
-    Accepts:
-      - list of Alpaca positions (dicts)
-      - dict with 'positions': [...]
-    """
     if raw is None:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "symbol", "qty", "avg_entry", "market_price", "market_value",
+            "unrealized_pl", "unrealized_plpc"
+        ])
 
-    if isinstance(raw, dict) and "positions" in raw and isinstance(raw["positions"], list):
+    if isinstance(raw, dict) and isinstance(raw.get("positions"), list):
         items = raw["positions"]
     elif isinstance(raw, list):
         items = raw
@@ -125,7 +208,7 @@ def normalize_positions(raw: Any) -> pd.DataFrame:
         ])
 
     df = pd.json_normalize(items)
-    # Try to map common fields
+
     mappings = {
         "symbol": ["symbol", "asset_symbol", "asset.symbol"],
         "qty": ["qty", "quantity"],
@@ -136,39 +219,31 @@ def normalize_positions(raw: Any) -> pd.DataFrame:
         "unrealized_plpc": ["unrealized_plpc", "unrealizedProfitLossPct"],
     }
 
-    out = {}
+    out: Dict[str, pd.Series] = {}
     for col, candidates in mappings.items():
         for c in candidates:
             if c in df.columns:
-                out[col] = pd.to_numeric(df[c], errors="coerce")
+                # symbol left as string; numerics coerced where needed
+                if col == "symbol":
+                    out[col] = df[c].astype(str)
+                else:
+                    out[col] = pd.to_numeric(df[c], errors="coerce")
                 break
         if col not in out:
             out[col] = pd.Series([None] * len(df))
 
-    # symbol as string
-    if "symbol" in df.columns:
-        out["symbol"] = df["symbol"].astype(str)
-    elif "asset_symbol" in df.columns:
-        out["symbol"] = df["asset_symbol"].astype(str)
-    elif "asset.symbol" in df.columns:
-        out["symbol"] = df["asset.symbol"].astype(str)
-
     ndf = pd.DataFrame(out)
-    # Sort by market value desc by default
     ndf = ndf.sort_values("market_value", ascending=False, na_position="last")
     return ndf
 
-
 def normalize_orders(raw: Any) -> pd.DataFrame:
-    """
-    Accepts:
-      - list of Alpaca orders (dicts)
-      - dict with 'orders': [...]
-    """
     if raw is None:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "id", "symbol", "side", "type", "qty", "notional",
+            "limit_price", "submitted_at", "filled_at", "filled_qty", "status"
+        ])
 
-    if isinstance(raw, dict) and "orders" in raw and isinstance(raw["orders"], list):
+    if isinstance(raw, dict) and isinstance(raw.get("orders"), list):
         items = raw["orders"]
     elif isinstance(raw, list):
         items = raw
@@ -183,7 +258,6 @@ def normalize_orders(raw: Any) -> pd.DataFrame:
 
     df = pd.json_normalize(items)
 
-    # Columns mapping
     def pick(*cols):
         for c in cols:
             if c in df.columns:
@@ -204,58 +278,88 @@ def normalize_orders(raw: Any) -> pd.DataFrame:
         "status": pick("status"),
     })
 
-    # Parse datetimes
     out["submitted_at"] = safe_to_datetime(out["submitted_at"])
     out["filled_at"] = safe_to_datetime(out["filled_at"])
 
     # IMPORTANT: pandas uses 'ascending', not 'descending'
-    # Show newest first in the UI by default
+    # Newest first by default
     out = out.sort_values("submitted_at", ascending=False, na_position="last")
     return out
 
+def to_dubai_str(ts: str | pd.Timestamp | None) -> Optional[str]:
+    if not ts:
+        return None
+    try:
+        if isinstance(ts, str):
+            dt = pd.to_datetime(ts, utc=True, errors="coerce")
+        else:
+            dt = pd.to_datetime(ts, utc=True, errors="coerce")
+        if pd.isna(dt):
+            return None
+        if pytz:
+            dt = dt.tz_convert("Asia/Dubai")
+            return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        else:
+            # no pytz — show ISO without tz conversion
+            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return None
 
-# -----------------------------
-# Load data
-# -----------------------------
-account_raw, account_path = load_json_from_candidates(ACCOUNT_FILES)
-positions_raw, positions_path = load_json_from_candidates(POSITIONS_FILES)
-orders_raw, orders_path = load_json_from_candidates(ORDERS_FILES)
 
-account = normalize_account(account_raw)
-df_pos = normalize_positions(positions_raw if positions_raw else (account_raw.get("positions") if account_raw else None))
-df_ord = normalize_orders(orders_raw if orders_raw else (account_raw.get("orders") if account_raw else None))
+# ===============================
+# Load data (live if keys present; else JSON files)
+# ===============================
+if USE_ALPACA:
+    try:
+        account, positions_raw, orders_raw = fetch_from_alpaca()
+    except Exception as e:
+        st.error(f"Failed to fetch from Alpaca ({e}). Falling back to JSON.")
+        USE_ALPACA = False
 
-# Updated time
-updated_at = account.get("updated_at")
-if pd.isna(updated_at) or not updated_at:
-    # fall back to newest timestamp among orders
+if not USE_ALPACA:
+    account_raw, account_path = load_json_from_candidates(ACCOUNT_FILES)
+    positions_raw, positions_path = load_json_from_candidates(POSITIONS_FILES)
+    orders_raw, orders_path = load_json_from_candidates(ORDERS_FILES)
+
+    account = normalize_account(account_raw)
+    df_pos = normalize_positions(positions_raw if positions_raw else (account_raw.get("positions") if account_raw else None))
+    df_ord = normalize_orders(orders_raw if orders_raw else (account_raw.get("orders") if account_raw else None))
+else:
+    df_pos = normalize_positions(positions_raw)
+    df_ord = normalize_orders(orders_raw)
+
+# Updated timestamp
+updated_at = account.get("updated_at") if isinstance(account, dict) else None
+if not updated_at:
     if not df_ord.empty and df_ord["submitted_at"].notna().any():
-        updated_at = df_ord["submitted_at"].max().isoformat()
-    else:
-        updated_at = None
+        updated_at = df_ord["submitted_at"].max()
 
-paper_flag = account.get("paper", True)
+paper_flag = bool(account.get("paper", True)) if isinstance(account, dict) else True
 
-# -----------------------------
+
+# ===============================
 # UI
-# -----------------------------
+# ===============================
 st.title("AI Trader Dashboard")
-subtitle = f"Updated at: {updated_at}" if updated_at else "Updated at: n/a"
-subtitle += f" • Paper: {str(bool(paper_flag))}"
-st.caption(subtitle)
+caption = f"Updated at: {to_dubai_str(updated_at) or 'n/a'} • Paper: {paper_flag}"
+st.caption(caption)
 
 # Metrics
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Cash", f"${account.get('cash', 0):,.2f}")
-c2.metric("Portfolio value", f"${account.get('portfolio_value', 0):,.2f}")
-c3.metric("Buying power", f"${account.get('buying_power', 0):,.2f}")
-c4.metric("Day P/L", f"${account.get('day_pl', 0):,.2f}")
+c1.metric("Cash", f"${float(account.get('cash', 0) or 0):,.2f}")
+c2.metric("Portfolio value", f"${float(account.get('portfolio_value', 0) or 0):,.2f}")
+c3.metric("Buying power", f"${float(account.get('buying_power', 0) or 0):,.2f}")
+day_pl = float(account.get("day_pl", 0) or 0)
+pl_prefix = "🟢" if day_pl > 0 else ("🔴" if day_pl < 0 else "⚪️")
+c4.metric("Day P/L", f"{pl_prefix} ${day_pl:,.2f}")
 
-# Helpful debug about where data was loaded from
-with st.expander("Data sources", expanded=False):
-    st.write("Account file:", str(account_path) if account_path else "not found")
-    st.write("Positions file:", str(positions_path) if positions_path else "not found")
-    st.write("Orders file:", str(orders_path) if orders_path else "not found")
+# Data sources (debug info)
+with st.expander("Data sources / mode", expanded=False):
+    st.write("Mode:", "Alpaca LIVE" if USE_ALPACA else "Local JSON")
+    if not USE_ALPACA:
+        st.write("Account file path:", str(locals().get("account_path")) if locals().get("account_path") else "not found")
+        st.write("Positions file path:", str(locals().get("positions_path")) if locals().get("positions_path") else "not found")
+        st.write("Orders file path:", str(locals().get("orders_path")) if locals().get("orders_path") else "not found")
 
 # Positions
 st.subheader("Positions")
@@ -265,33 +369,37 @@ else:
     fmt_pos = df_pos.copy()
     money_cols = ["avg_entry", "market_price", "market_value", "unrealized_pl"]
     pct_cols = ["unrealized_plpc"]
+    if "qty" in fmt_pos.columns:
+        fmt_pos["qty"] = fmt_pos["qty"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip(".") if pd.notna(x) else "")
     for col in money_cols:
         if col in fmt_pos.columns:
             fmt_pos[col] = fmt_pos[col].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
     for col in pct_cols:
         if col in fmt_pos.columns:
             fmt_pos[col] = fmt_pos[col].map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
-    if "qty" in fmt_pos.columns:
-        fmt_pos["qty"] = fmt_pos["qty"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip(".") if pd.notna(x) else "")
     st.dataframe(fmt_pos, use_container_width=True, hide_index=True)
 
-# Recent orders
+# Orders
 st.subheader("Recent orders")
 if df_ord.empty:
     st.info("No orders to display.")
 else:
-    # Let users toggle sort direction client-side with Streamlit table, but default newest first
     fmt_ord = df_ord.copy()
-    money_cols = ["notional", "limit_price"]
-    qty_cols = ["qty", "filled_qty"]
-    for col in money_cols:
+    # Format numbers
+    for col in ["notional", "limit_price"]:
         if col in fmt_ord.columns:
             fmt_ord[col] = fmt_ord[col].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
-    for col in qty_cols:
+    for col in ["qty", "filled_qty"]:
         if col in fmt_ord.columns:
             fmt_ord[col] = fmt_ord[col].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip(".") if pd.notna(x) else "")
-    # Friendly datetime strings
+    # Friendly datetime strings (show in local tz if available)
     for col in ["submitted_at", "filled_at"]:
-        if col in fmt_ord.columns:
-            fmt_ord[col] = fmt_ord[col].dt.tz_convert(None).dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+        if col in fmt_ord.columns and pd.api.types.is_datetime64_any_dtype(df_ord[col]):
+            try:
+                if pytz:
+                    fmt_ord[col] = fmt_ord[col].dt.tz_convert("Asia/Dubai").dt.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    fmt_ord[col] = fmt_ord[col].dt.tz_convert(None).dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                fmt_ord[col] = fmt_ord[col].astype(str)
     st.dataframe(fmt_ord, use_container_width=True, hide_index=True)
