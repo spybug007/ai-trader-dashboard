@@ -3,3 +3,7 @@ pandas>=2.2.0
 python-dateutil>=2.8.2
 pytz>=2024.1
 streamlit>=1.37.0
+streamlit
+pandas
+alpaca-py
+
