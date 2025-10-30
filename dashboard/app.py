@@ -1,5 +1,5 @@
 # dashboard/app.py
-# AI Trader Dashboard — live (Alpaca) or local JSON fallback
+# AI Trader Dashboard — live (Alpaca) or local JSON fallback + Refresh Now & Charts
 from __future__ import annotations
 
 import os
@@ -51,9 +51,8 @@ if USE_ALPACA:
     try:
         from alpaca.trading.client import TradingClient
     except Exception as e:
-        # If alpaca-py is missing, gracefully disable live mode
         USE_ALPACA = False
-        st.warning(f"alpaca-py not found or failed to import ({e}). Falling back to JSON files.")
+        st.warning(f"alpaca-py import failed ({e}). Falling back to JSON files.")
 
 def fetch_from_alpaca() -> tuple[dict, list[dict], list[dict]]:
     """
@@ -170,7 +169,6 @@ def normalize_account(raw: Dict[str, Any] | None) -> Dict[str, Any]:
         v = acc.get(key, default)
         if isinstance(v, str):
             try:
-                # try int or float with commas
                 if v.isdigit():
                     return int(v)
                 return float(v.replace(",", ""))
@@ -223,7 +221,6 @@ def normalize_positions(raw: Any) -> pd.DataFrame:
     for col, candidates in mappings.items():
         for c in candidates:
             if c in df.columns:
-                # symbol left as string; numerics coerced where needed
                 if col == "symbol":
                     out[col] = df[c].astype(str)
                 else:
@@ -300,7 +297,6 @@ def to_dubai_str(ts: str | pd.Timestamp | None) -> Optional[str]:
             dt = dt.tz_convert("Asia/Dubai")
             return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
         else:
-            # no pytz — show ISO without tz conversion
             return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return None
@@ -338,9 +334,17 @@ paper_flag = bool(account.get("paper", True)) if isinstance(account, dict) else 
 
 
 # ===============================
-# UI
+# UI — Header with Refresh Now
 # ===============================
-st.title("AI Trader Dashboard")
+header_left, header_right = st.columns([1, 1])
+with header_left:
+    st.title("AI Trader Dashboard")
+with header_right:
+    st.markdown("<div style='text-align:right;'>", unsafe_allow_html=True)
+    if st.button("🔄 Обновить сейчас", use_container_width=True):
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
 caption = f"Updated at: {to_dubai_str(updated_at) or 'n/a'} • Paper: {paper_flag}"
 st.caption(caption)
 
@@ -361,7 +365,10 @@ with st.expander("Data sources / mode", expanded=False):
         st.write("Positions file path:", str(locals().get("positions_path")) if locals().get("positions_path") else "not found")
         st.write("Orders file path:", str(locals().get("orders_path")) if locals().get("orders_path") else "not found")
 
-# Positions
+
+# ===============================
+# Positions Table
+# ===============================
 st.subheader("Positions")
 if df_pos.empty:
     st.info("No positions to display.")
@@ -379,7 +386,10 @@ else:
             fmt_pos[col] = fmt_pos[col].map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
     st.dataframe(fmt_pos, use_container_width=True, hide_index=True)
 
-# Orders
+
+# ===============================
+# Orders Table
+# ===============================
 st.subheader("Recent orders")
 if df_ord.empty:
     st.info("No orders to display.")
@@ -392,7 +402,7 @@ else:
     for col in ["qty", "filled_qty"]:
         if col in fmt_ord.columns:
             fmt_ord[col] = fmt_ord[col].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip(".") if pd.notna(x) else "")
-    # Friendly datetime strings (show in local tz if available)
+    # Friendly datetime strings
     for col in ["submitted_at", "filled_at"]:
         if col in fmt_ord.columns and pd.api.types.is_datetime64_any_dtype(df_ord[col]):
             try:
@@ -403,3 +413,50 @@ else:
             except Exception:
                 fmt_ord[col] = fmt_ord[col].astype(str)
     st.dataframe(fmt_ord, use_container_width=True, hide_index=True)
+
+
+# ===============================
+# Charts
+# ===============================
+st.subheader("Charts")
+
+chart_col1, chart_col2 = st.columns(2)
+
+# --- Chart 1: Portfolio allocation by symbol (bar) ---
+with chart_col1:
+    st.markdown("**Portfolio allocation (by market value)**")
+    if df_pos.empty or "symbol" not in df_pos.columns or "market_value" not in df_pos.columns:
+        st.info("No positions to chart.")
+    else:
+        alloc = df_pos[["symbol", "market_value"]].dropna()
+        alloc = alloc.groupby("symbol", as_index=False)["market_value"].sum().sort_values("market_value", ascending=False)
+        alloc = alloc.set_index("symbol")
+        st.bar_chart(alloc)  # Streamlit native chart
+
+# --- Chart 2: Filled notional by day (line) ---
+with chart_col2:
+    st.markdown("**Filled notional by day**")
+    if df_ord.empty:
+        st.info("No orders to chart.")
+    else:
+        # Use filled_at if present, else submitted_at
+        ts = df_ord["filled_at"].copy()
+        if ts.isna().all():
+            ts = df_ord["submitted_at"].copy()
+        ts = pd.to_datetime(ts, errors="coerce", utc=True)
+
+        # Compute notional fallback if NaN: filled_qty * limit_price
+        notional = pd.to_numeric(df_ord.get("notional"), errors="coerce")
+        if notional.isna().all():
+            filled_qty = pd.to_numeric(df_ord.get("filled_qty"), errors="coerce")
+            limit_price = pd.to_numeric(df_ord.get("limit_price"), errors="coerce")
+            notional = filled_qty * limit_price
+
+        df_line = pd.DataFrame({"ts": ts, "notional": notional}).dropna()
+        if df_line.empty:
+            st.info("Not enough filled data to chart.")
+        else:
+            df_line["date"] = df_line["ts"].dt.tz_convert("Asia/Dubai").dt.date if pytz else df_line["ts"].dt.date
+            daily = df_line.groupby("date", as_index=False)["notional"].sum().sort_values("date")
+            daily = daily.set_index("date")
+            st.line_chart(daily)
