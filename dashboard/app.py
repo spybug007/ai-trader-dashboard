@@ -6,6 +6,8 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, List
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -19,11 +21,11 @@ try:
 except Exception:
     pass
 
-# ---------- Timezone (optional) ----------
+# ---------- Optional timezone ----------
 try:
-    import pytz
+    import pytz  # noqa
 except Exception:
-    pytz = None
+    pass
 
 
 # ===============================
@@ -60,21 +62,26 @@ def load_portfolio_data() -> Dict[str, Any]:
     api_secret = _get_secret("ALPACA_SECRET_KEY")
     base_url = _get_secret("ALPACA_API_BASE_URL", "https://paper-api.alpaca.markets")
 
-    # Prefer live if secrets exist
+    api = None
+    account: Dict[str, Any] = {}
+    positions: List[Any] = []
+
     if api_key and api_secret:
         try:
-            import alpaca_trade_api as tradeapi
+            import alpaca_trade_api as tradeapi  # type: ignore
             api = tradeapi.REST(api_key, api_secret, base_url, api_version="v2")
             account = api.get_account()._raw
             positions = api.list_positions()
-            return {"account": account, "positions": positions, "api": api}
         except Exception as e:
             st.warning(f"⚠️ Failed to fetch live data: {e}")
-            data = _load_json("sample_portfolio.json")
-            return {"account": data.get("account", {}), "positions": [], "api": None}
-    else:
-        data = _load_json("sample_portfolio.json")
-        return {"account": data.get("account", {}), "positions": [], "api": None}
+
+    # Fallback if no live data
+    if not account:
+        sample = _load_json("sample_portfolio.json")
+        account = sample.get("account", {})
+        positions = []
+
+    return {"account": account, "positions": positions, "api": api}
 
 
 def load_equity_history(api, period: str, timeframe: str) -> pd.DataFrame:
@@ -82,21 +89,19 @@ def load_equity_history(api, period: str, timeframe: str) -> pd.DataFrame:
     period: '1D','1W','1M','3M','1Y','all'
     timeframe: '1Min','5Min','15Min','1H','1D'
     """
-    # Live
+    # Live from Alpaca
     if api is not None:
         try:
-            # v2 returns an object with .timestamp (epoch secs) and .equity
             hist = api.get_portfolio_history(period=period, timeframe=timeframe)
-            # Compatible with both dict-like and attr-like responses
             ts = hist.timestamp if hasattr(hist, "timestamp") else hist["timestamp"]
             eq = hist.equity if hasattr(hist, "equity") else hist["equity"]
-            df = pd.DataFrame({"time": pd.to_datetime(ts, unit="s"), "equity": pd.to_numeric(eq, errors="coerce")})
-            df = df.dropna()
+            df = pd.DataFrame({"time": pd.to_datetime(ts, unit="s"),
+                               "equity": pd.to_numeric(eq, errors="coerce")}).dropna()
             return df
         except Exception as e:
             st.warning(f"⚠️ Failed to fetch equity history ({period}/{timeframe}): {e}")
 
-    # Fallback — try local sample; else synthesize short series
+    # Fallback from local sample
     sample = _load_json("sample_portfolio_history.json")
     if "timestamp" in sample and "equity" in sample:
         df = pd.DataFrame({
@@ -105,13 +110,13 @@ def load_equity_history(api, period: str, timeframe: str) -> pd.DataFrame:
         }).dropna()
         return df
 
-    # Minimal synthetic fallback around a notional value
-    base = 25_000
-    rng = pd.date_range(end=pd.Timestamp.utcnow().floor("T"), periods=60, freq="T")
-    drift = pd.Series(range(len(rng))).apply(lambda i: base * (1 + 0.0002 * i)).astype(float)
-    noise = pd.Series(pd.Series(pd.np.random.normal(0, base * 0.0008, len(rng))).values)  # small noise
-    df = pd.DataFrame({"time": rng, "equity": (drift + noise).rolling(3, min_periods=1).mean()})
-    return df
+    # Synthetic minimal fallback
+    base = 25_000.0
+    rng = pd.date_range(end=pd.Timestamp.utcnow().floor("T"), periods=120, freq="T")
+    drift = base * (1 + 0.00015 * np.arange(len(rng)))
+    noise = np.random.normal(0, base * 0.0008, len(rng))
+    series = pd.Series(drift + noise, index=rng).rolling(3, min_periods=1).mean()
+    return pd.DataFrame({"time": series.index, "equity": series.values})
 
 
 # ===============================
@@ -129,8 +134,7 @@ equity_now = _to_float(account.get("equity", portfolio_value))
 last_equity = _to_float(account.get("last_equity", equity_now))
 day_pl = equity_now - last_equity
 
-# Total P/L: если есть отдельный трекер initial_investment — подставь тут
-# Временно оценим как (equity_now - (portfolio_value - 5000)) чтобы показать метрику
+# Total P/L: при наличии своего трекера подставь сюда значение initial_investment
 initial_investment = _to_float(account.get("initial_margin_requirement", 0)) or (portfolio_value - 5000)
 total_pl = equity_now - initial_investment
 
@@ -158,7 +162,6 @@ c5.metric("💰 Total P/L", color_text(total_pl))
 # ===============================
 st.subheader("📉 Equity chart")
 
-# Выбор периода/таймфрейма
 left, right = st.columns([2, 1])
 with left:
     period_label = st.selectbox(
@@ -168,15 +171,13 @@ with left:
         help="Portfolio equity over selected range"
     )
 with right:
-    # Для дня — 1Min/5Min, для недель/месяцев — 15Min/1D
     timeframe_label = st.selectbox(
         "Timeframe",
         ["Auto", "1Min", "5Min", "15Min", "1H", "1D"],
         index=0,
-        help="Data granularity (Auto chooses sensible default)"
+        help="Data granularity"
     )
 
-# Маппинг auto-таймфрейма
 def default_timeframe(period: str) -> str:
     if period == "1D":
         return "5Min"
@@ -192,13 +193,10 @@ period_key = period_label.lower() if period_label != "All" else "all"
 eq_df = load_equity_history(api, period=period_key, timeframe=mapped_timeframe)
 
 if not eq_df.empty:
-    # Пересчитаем Day P/L от графика, если выбран 1D (точнее)
+    eq_df = eq_df.sort_values("time").set_index("time")
     if period_label == "1D" and len(eq_df) >= 2:
         day_pl_chart = float(eq_df["equity"].iloc[-1]) - float(eq_df["equity"].iloc[0])
         st.caption(f"Session P/L (from chart): {color_text(day_pl_chart)}")
-
-    eq_df = eq_df.sort_values("time")
-    eq_df = eq_df.set_index("time")
     st.line_chart(eq_df["equity"], height=280)
 else:
     st.info("No equity history available for the selected range.")
@@ -210,7 +208,6 @@ else:
 if positions:
     st.subheader("📋 Open positions")
 
-    # Alpaca Position object -> dict
     rows = []
     for p in positions:
         try:
@@ -227,9 +224,8 @@ if positions:
     if rows:
         df = pd.DataFrame(rows)
 
-        # Стилизуем P/L столбцы
         def style_pl(v):
-            if pd.isna(v): 
+            if pd.isna(v):
                 return ""
             if v > 0:
                 return "color: green"
