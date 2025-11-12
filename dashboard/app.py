@@ -1,5 +1,5 @@
 # dashboard/app.py
-# AI Trader Dashboard — live Alpaca + Total P/L from first equity + $/% P&L + color-coded table & chart + Open Orders
+# AI Trader Dashboard — live Alpaca + dynamic chart + open orders + styled P/L cards
 from __future__ import annotations
 import os
 import json
@@ -19,6 +19,26 @@ try:
     st_autorefresh(interval=15_000, key="autorfr")  # refresh every 15s
 except Exception:
     pass
+
+# ---------- KPI cards CSS ----------
+st.markdown("""
+<style>
+.kpi{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+    padding:16px 18px;
+    border:1px solid rgba(120,120,120,.25);
+    border-radius:14px;
+    background:rgba(255,255,255,.02)
+}
+.kpi .label{font-size:0.95rem;opacity:.85}
+.kpi .value{font-size:1.9rem;font-weight:700;line-height:1.15}
+@media (max-width: 900px){
+  .kpi .value{font-size:1.6rem}
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # ===============================
@@ -47,11 +67,19 @@ def _fmt_money(x: float) -> str:
     return f"${x:,.2f}"
 
 def _pl_html(amount: float, base: float) -> str:
-    """Возвращает HTML-строку с окрашенным P/L: '+1,234.56 (+2.34%)'."""
+    """HTML для цветного P/L."""
     pct = (amount / base * 100.0) if base else 0.0
     color = "rgb(16,185,129)" if amount > 0 else "rgb(239,68,68)" if amount < 0 else "#9CA3AF"
     text = f"{amount:+,.2f} ({pct:+.2f}%)"
     return f"<span style='color:{color};font-weight:600'>{text}</span>"
+
+def _pl_card(label: str, amount: float, base: float) -> None:
+    """KPI-карточка P/L"""
+    st.markdown(
+        f"<div class='kpi'><div class='label'>{label}</div>"
+        f"<div class='value'>{_pl_html(amount, base)}</div></div>",
+        unsafe_allow_html=True
+    )
 
 
 # ===============================
@@ -82,6 +110,7 @@ def load_portfolio_data() -> Dict[str, Any]:
 
     return {"account": account, "positions": positions, "api": api}
 
+
 def load_equity_history(api, period: str, timeframe: str) -> pd.DataFrame:
     if api is not None:
         try:
@@ -110,6 +139,7 @@ def load_equity_history(api, period: str, timeframe: str) -> pd.DataFrame:
     noise = np.random.normal(0, base * 0.0008, len(rng))
     series = pd.Series(drift + noise, index=rng).rolling(3, min_periods=1).mean()
     return pd.DataFrame({"time": series.index, "equity": series.values})
+
 
 def get_initial_equity(api, fallback_equity_now: float) -> float:
     if api is not None:
@@ -144,7 +174,6 @@ buying_power = _to_float(account.get("buying_power", 0))
 equity_now = _to_float(account.get("equity", portfolio_value))
 last_equity = _to_float(account.get("last_equity", equity_now))
 day_pl = equity_now - last_equity
-
 initial_equity = get_initial_equity(api, equity_now)
 total_pl = equity_now - initial_equity
 
@@ -154,7 +183,6 @@ total_pl = equity_now - initial_equity
 # ===============================
 st.subheader("📊 Portfolio summary")
 
-# KPI блок
 c1, c2, c3 = st.columns(3)
 with c1:
     st.metric("💵 Cash", _fmt_money(cash))
@@ -163,31 +191,27 @@ with c2:
 with c3:
     st.metric("⚙️ Buying power", _fmt_money(buying_power))
 
-# P/L с устойчивой подсветкой в отдельной строке
+# --- Stylish P/L cards ---
 p1, p2 = st.columns(2)
 with p1:
-    st.markdown("**📅 Day P/L**")
-    st.markdown(_pl_html(day_pl, last_equity if last_equity else equity_now), unsafe_allow_html=True)
+    _pl_card("📅 Day P/L", day_pl, last_equity if last_equity else equity_now)
 with p2:
-    st.markdown("**💰 Total P/L**")
-    st.markdown(_pl_html(total_pl, initial_equity if initial_equity else equity_now), unsafe_allow_html=True)
+    _pl_card("💰 Total P/L", total_pl, initial_equity if initial_equity else equity_now)
 
 
 # ===============================
-# Equity Chart (selectable range) — dynamic axis
+# Equity Chart (dynamic axis)
 # ===============================
 st.subheader("📉 Equity chart")
 
 left, right = st.columns([2, 1])
 with left:
     period_label = st.selectbox(
-        "Range", ["1D", "1W", "1M", "3M", "1Y", "All"], index=0,
-        help="Portfolio equity over selected range"
+        "Range", ["1D", "1W", "1M", "3M", "1Y", "All"], index=0
     )
 with right:
     timeframe_label = st.selectbox(
-        "Timeframe", ["Auto", "1Min", "5Min", "15Min", "1H", "1D"], index=0,
-        help="Data granularity"
+        "Timeframe", ["Auto", "1Min", "5Min", "15Min", "1H", "1D"], index=0
     )
 
 def default_timeframe(period: str) -> str:
@@ -200,54 +224,41 @@ mapped_timeframe = default_timeframe(period_label) if timeframe_label == "Auto" 
 period_key = period_label.lower() if period_label != "All" else "all"
 
 eq_df = load_equity_history(api, period=period_key, timeframe=mapped_timeframe)
-
-# тумблер: начинать ось Y с нуля
 start_at_zero = st.checkbox("Start Y-axis at zero", value=False)
 
 if not eq_df.empty:
     eq_df = eq_df.sort_values("time")
-    # Быстрый P/L по сессии из графика
     if period_label == "1D" and len(eq_df) >= 2:
         day_pl_chart = float(eq_df["equity"].iloc[-1]) - float(eq_df["equity"].iloc[0])
         base_eq = float(eq_df["equity"].iloc[0])
         st.markdown(
-            f"<div style='font-size:0.9rem;opacity:0.8'>Session P/L (from chart): {_pl_html(day_pl_chart, base_eq)}</div>",
+            f"<div style='font-size:0.9rem;opacity:0.8'>Session P/L: {_pl_html(day_pl_chart, base_eq)}</div>",
             unsafe_allow_html=True
         )
 
-    # Altair с аккуратной шкалой
-    try:
-        import altair as alt
-        y_min = float(eq_df["equity"].min())
-        y_max = float(eq_df["equity"].max())
-        span = max(y_max - y_min, 1e-6)
-        pad = span * 0.06
-        domain = [0, y_max + pad] if start_at_zero else [y_min - pad, y_max + pad]
+    import altair as alt
+    y_min, y_max = float(eq_df["equity"].min()), float(eq_df["equity"].max())
+    span, pad = max(y_max - y_min, 1e-6), (y_max - y_min) * 0.06
+    domain = [0, y_max + pad] if start_at_zero else [y_min - pad, y_max + pad]
 
-        chart = (
-            alt.Chart(eq_df)
-            .mark_line()
-            .encode(
-                x=alt.X("time:T", title="Time"),
-                y=alt.Y("equity:Q", title="Equity", scale=alt.Scale(domain=domain, nice=False)),
-                tooltip=[
-                    alt.Tooltip("time:T", title="Time"),
-                    alt.Tooltip("equity:Q", title="Equity", format="$.2f"),
-                ],
-            )
-            .properties(height=280)
-            .interactive()
+    chart = (
+        alt.Chart(eq_df)
+        .mark_line()
+        .encode(
+            x="time:T",
+            y=alt.Y("equity:Q", scale=alt.Scale(domain=domain, nice=False)),
+            tooltip=[alt.Tooltip("time:T"), alt.Tooltip("equity:Q", format="$.2f")],
         )
-        st.altair_chart(chart, use_container_width=True)
-    except Exception:
-        st.warning("Altair is unavailable, falling back to a basic line chart.")
-        st.line_chart(eq_df.set_index("time")["equity"], height=280, use_container_width=True)
+        .properties(height=280)
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
 else:
-    st.info("No equity history available for the selected range.")
+    st.info("No equity history available.")
 
 
 # ===============================
-# Open Positions — FULL columns with total change & share of equity
+# Open Positions
 # ===============================
 def fmt_pct(x: float) -> str:
     return f"{x:.2f}%"
@@ -263,35 +274,19 @@ def build_positions_df(positions: List[Any], equity_now_val: float) -> pd.DataFr
             cost_basis = _to_float(getattr(p, "cost_basis", 0))
             market_value = _to_float(getattr(p, "market_value", 0))
             unrealized_pl = _to_float(getattr(p, "unrealized_pl", 0))
-            unrealized_plpc = _to_float(getattr(p, "unrealized_plpc", 0)) * 100.0  # %
+            unrealized_plpc = _to_float(getattr(p, "unrealized_plpc", 0)) * 100.0
             intraday_pl = _to_float(getattr(p, "unrealized_intraday_pl", 0))
-            intraday_plpc = _to_float(getattr(p, "unrealized_intraday_plpc", 0)) * 100.0  # %
-            change_today = _to_float(getattr(p, "change_today", 0)) * 100.0  # %
-
-            # New: share of equity & P/L contribution
+            intraday_plpc = _to_float(getattr(p, "unrealized_intraday_plpc", 0)) * 100.0
+            change_today = _to_float(getattr(p, "change_today", 0)) * 100.0
             share_of_equity = (market_value / equity_now_val * 100.0) if equity_now_val else 0.0
             pl_contribution_pct = (unrealized_pl / equity_now_val * 100.0) if equity_now_val else 0.0
-
             rows.append({
-                "Symbol": symbol,
-                "Qty": qty,
-                "Avg entry": avg_entry,
-                "Current price": current_price,
-                "Cost basis": cost_basis,
-                "Market value": market_value,
-
-                # Total change (Unrealized P/L)
-                "Total change ($)": unrealized_pl,
-                "Total change (%)": unrealized_plpc,
-
-                # Intraday change
-                "Intraday P/L ($)": intraday_pl,
-                "Intraday P/L (%)": intraday_plpc,
+                "Symbol": symbol, "Qty": qty, "Avg entry": avg_entry, "Current price": current_price,
+                "Cost basis": cost_basis, "Market value": market_value,
+                "Total change ($)": unrealized_pl, "Total change (%)": unrealized_plpc,
+                "Intraday P/L ($)": intraday_pl, "Intraday P/L (%)": intraday_plpc,
                 "Change today (%)": change_today,
-
-                # Analytics
-                "Share of equity (%)": share_of_equity,
-                "P/L contribution (%)": pl_contribution_pct,
+                "Share of equity (%)": share_of_equity, "P/L contribution (%)": pl_contribution_pct
             })
         except Exception:
             pass
@@ -303,56 +298,36 @@ if positions:
     if not df.empty:
         def color_posneg(v):
             if pd.isna(v): return ""
-            if v > 0: return "color: green"
-            if v < 0: return "color: red"
-            return "color: gray"
-
+            if v > 0: return "color:green"
+            if v < 0: return "color:red"
+            return "color:gray"
         money_cols = ["Market value", "Total change ($)", "Intraday P/L ($)"]
         pct_cols = [
             "Total change (%)", "Intraday P/L (%)", "Change today (%)",
             "Share of equity (%)", "P/L contribution (%)"
         ]
-
         st.dataframe(
-            df.style
-              .format({
-                  "Qty": "{:,.0f}",
-                  "Avg entry": "${:,.2f}",
-                  "Current price": "${:,.2f}",
-                  "Cost basis": "${:,.2f}",
-                  "Market value": "${:,.2f}",
-                  "Total change ($)": "${:,.2f}",
-                  "Intraday P/L ($)": "${:,.2f}",
-                  "Total change (%)": fmt_pct,
-                  "Intraday P/L (%)": fmt_pct,
-                  "Change today (%)": fmt_pct,
-                  "Share of equity (%)": fmt_pct,
-                  "P/L contribution (%)": fmt_pct,
-              })
-              .applymap(color_posneg, subset=money_cols + pct_cols),
-            use_container_width=True,
-            height=460
+            df.style.format({
+                "Qty": "{:,.0f}", "Avg entry": "${:,.2f}", "Current price": "${:,.2f}",
+                "Cost basis": "${:,.2f}", "Market value": "${:,.2f}",
+                "Total change ($)": "${:,.2f}", "Intraday P/L ($)": "${:,.2f}",
+                "Total change (%)": fmt_pct, "Intraday P/L (%)": fmt_pct, "Change today (%)": fmt_pct,
+                "Share of equity (%)": fmt_pct, "P/L contribution (%)": fmt_pct,
+            }).applymap(color_posneg, subset=money_cols + pct_cols),
+            use_container_width=True, height=460
         )
-    else:
-        st.info("No open positions found.")
 else:
     st.info("No open positions found.")
 
 
 # ===============================
-# Open Orders — separate from Positions
+# Open Orders
 # ===============================
 def load_open_orders(api):
-    """Возвращает список открытых ордеров Alpaca. Фоллбэк — пусто."""
     if api is None:
         return []
     try:
-        orders = api.list_orders(
-            status="open",         # new/accepted/partially_filled/open
-            nested=False,
-            direction="desc",
-            limit=200
-        )
+        orders = api.list_orders(status="open", nested=False, direction="desc", limit=200)
         return orders
     except Exception as e:
         st.warning(f"⚠️ Failed to fetch open orders: {e}")
@@ -375,7 +350,6 @@ def build_orders_df(orders: List[Any]) -> pd.DataFrame:
                 "Status": getattr(o, "status", ""),
                 "Filled qty": _to_float(getattr(o, "filled_qty", 0)),
                 "Avg fill": _to_float(getattr(o, "filled_avg_price", 0)),
-                "ID": getattr(o, "id", ""),
             })
         except Exception:
             pass
@@ -388,30 +362,21 @@ if orders:
     if not odf.empty:
         def color_side(v):
             if pd.isna(v): return ""
-            if str(v).lower() == "buy": return "color: green"
-            if str(v).lower() == "sell": return "color: red"
+            if str(v).lower() == "buy": return "color:green"
+            if str(v).lower() == "sell": return "color:red"
             return ""
         def color_status(v):
             if pd.isna(v): return ""
             s = str(v).lower()
-            if s in ("new","accepted","open","partially_filled"): return "color: #2563EB"  # blue
-            if s in ("rejected","canceled","stopped","expired"): return "color: #EF4444"   # red
-            return "color: #6B7280"  # gray
-
+            if s in ("new","accepted","open","partially_filled"): return "color:#2563EB"
+            if s in ("rejected","canceled","stopped","expired"): return "color:#EF4444"
+            return "color:#6B7280"
         st.dataframe(
-            odf.style
-               .format({
-                   "Qty": "{:,.0f}",
-                   "Limit price": "${:,.2f}",
-                   "Stop price": "${:,.2f}",
-                   "Trail": "{:,.2f}",
-                   "Filled qty": "{:,.0f}",
-                   "Avg fill": "${:,.2f}",
-               })
-               .applymap(color_side, subset=["Side"])
-               .applymap(color_status, subset=["Status"]),
-            use_container_width=True,
-            height=360
+            odf.style.format({
+                "Qty": "{:,.0f}", "Limit price": "${:,.2f}", "Stop price": "${:,.2f}",
+                "Trail": "{:,.2f}", "Filled qty": "{:,.0f}", "Avg fill": "${:,.2f}",
+            }).applymap(color_side, subset=["Side"]).applymap(color_status, subset=["Status"]),
+            use_container_width=True, height=360
         )
 else:
     st.caption("No open orders.")
