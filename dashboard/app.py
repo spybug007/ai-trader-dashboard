@@ -89,6 +89,8 @@ def fetch_from_alpaca() -> tuple[dict, list[dict], list[dict]]:
                 "market_value": p.market_value,
                 "unrealized_pl": p.unrealized_pl,
                 "unrealized_plpc": p.unrealized_plpc,
+                "change_today": getattr(p, "change_today", None),                 # NEW
+                "unrealized_intraday_pl": getattr(p, "unrealized_intraday_pl", None),  # NEW
             })
     except Exception:
         positions = []
@@ -189,7 +191,7 @@ def normalize_positions(raw: Any) -> pd.DataFrame:
     if raw is None:
         return pd.DataFrame(columns=[
             "symbol", "qty", "avg_entry", "market_price", "market_value",
-            "unrealized_pl", "unrealized_plpc"
+            "unrealized_pl", "unrealized_plpc", "change_today", "unrealized_intraday_pl"
         ])
 
     if isinstance(raw, dict) and isinstance(raw.get("positions"), list):
@@ -202,7 +204,7 @@ def normalize_positions(raw: Any) -> pd.DataFrame:
     if not items:
         return pd.DataFrame(columns=[
             "symbol", "qty", "avg_entry", "market_price", "market_value",
-            "unrealized_pl", "unrealized_plpc"
+            "unrealized_pl", "unrealized_plpc", "change_today", "unrealized_intraday_pl"
         ])
 
     df = pd.json_normalize(items)
@@ -215,6 +217,8 @@ def normalize_positions(raw: Any) -> pd.DataFrame:
         "market_value": ["market_value", "market_val"],
         "unrealized_pl": ["unrealized_pl", "unrealizedProfitLoss"],
         "unrealized_plpc": ["unrealized_plpc", "unrealizedProfitLossPct"],
+        "change_today": ["change_today"],                        # NEW
+        "unrealized_intraday_pl": ["unrealized_intraday_pl"],    # NEW
     }
 
     out: Dict[str, pd.Series] = {}
@@ -334,6 +338,65 @@ paper_flag = bool(account.get("paper", True)) if isinstance(account, dict) else 
 
 
 # ===============================
+# Enhance positions with weights & returns (incl. cash)
+# ===============================
+import numpy as np
+
+equity = float(account.get("portfolio_value") or 0.0)
+cash = float(account.get("cash") or 0.0)
+
+if not df_pos.empty:
+    # ensure numeric types
+    for col in ["market_value", "unrealized_pl", "unrealized_plpc", "change_today", "unrealized_intraday_pl"]:
+        if col in df_pos.columns:
+            df_pos[col] = pd.to_numeric(df_pos[col], errors="coerce")
+
+    # weight from total equity (includes cash)
+    if equity > 0 and "market_value" in df_pos.columns:
+        df_pos["weight_pct"] = (df_pos["market_value"] / equity) * 100.0
+    else:
+        df_pos["weight_pct"] = 0.0
+
+    # day P/L ($) and (%)
+    df_pos["pl_day_$"] = df_pos["unrealized_intraday_pl"] if "unrealized_intraday_pl" in df_pos.columns else np.nan
+    if "change_today" in df_pos.columns:
+        df_pos["pl_day_%"] = df_pos["change_today"] * 100.0  # 0.0123 -> 1.23%
+    else:
+        df_pos["pl_day_%"] = np.nan
+
+    # total P/L ($) and (%)
+    df_pos["pl_total_$"] = df_pos["unrealized_pl"] if "unrealized_pl" in df_pos.columns else np.nan
+    if "unrealized_plpc" in df_pos.columns:
+        df_pos["pl_total_%"] = df_pos["unrealized_plpc"] * 100.0
+    else:
+        df_pos["pl_total_%"] = np.nan
+
+    # sort by weight
+    df_pos = df_pos.sort_values("weight_pct", ascending=False, na_position="last").reset_index(drop=True)
+
+    # add CASH row for clarity
+    if equity > 0 and cash >= 0:
+        cash_weight = (cash / equity) * 100.0
+        cash_row = {
+            "symbol": "CASH",
+            "qty": np.nan,
+            "avg_entry": np.nan,
+            "market_price": np.nan,
+            "market_value": cash,
+            "unrealized_pl": np.nan,
+            "unrealized_plpc": np.nan,
+            "change_today": np.nan,
+            "unrealized_intraday_pl": np.nan,
+            "weight_pct": cash_weight,
+            "pl_day_$": np.nan,
+            "pl_day_%": np.nan,
+            "pl_total_$": np.nan,
+            "pl_total_%": np.nan,
+        }
+        df_pos = pd.concat([df_pos, pd.DataFrame([cash_row])], ignore_index=True)
+
+
+# ===============================
 # UI — Header with Refresh Now
 # ===============================
 header_left, header_right = st.columns([1, 1])
@@ -374,17 +437,39 @@ if df_pos.empty:
     st.info("No positions to display.")
 else:
     fmt_pos = df_pos.copy()
-    money_cols = ["avg_entry", "market_price", "market_value", "unrealized_pl"]
-    pct_cols = ["unrealized_plpc"]
+
+    money_cols = ["avg_entry", "market_price", "market_value", "pl_day_$", "pl_total_$"]
+    pct_cols = ["unrealized_plpc", "pl_day_%", "pl_total_%", "weight_pct"]
+
     if "qty" in fmt_pos.columns:
         fmt_pos["qty"] = fmt_pos["qty"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip(".") if pd.notna(x) else "")
+
     for col in money_cols:
         if col in fmt_pos.columns:
-            fmt_pos[col] = fmt_pos[col].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
+            fmt_pos[col] = fmt_pos[col].map(lambda x: ("" if pd.isna(x) else f"${x:,.2f}"))
+
     for col in pct_cols:
         if col in fmt_pos.columns:
-            fmt_pos[col] = fmt_pos[col].map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
-    st.dataframe(fmt_pos, use_container_width=True, hide_index=True)
+            fmt_pos[col] = fmt_pos[col].map(lambda x: ("" if pd.isna(x) else f"{x:.2f}%"))
+
+    rename_map = {
+        "avg_entry": "Avg price",
+        "market_price": "Last price",
+        "market_value": "Market value, $",
+        "weight_pct": "Weight, %",
+        "pl_day_$": "P/L day, $",
+        "pl_day_%": "P/L day, %",
+        "pl_total_$": "P/L total, $",
+        "pl_total_%": "P/L total, %",
+        "unrealized_plpc": "Unrealized PL, %",
+    }
+    fmt_pos = fmt_pos.rename(columns=rename_map)
+
+    st.dataframe(fmt_pos[
+        [c for c in ["symbol","qty","Avg price","Last price","Market value, $","Weight, %",
+                     "P/L day, $","P/L day, %","P/L total, $","P/L total, %"]
+         if c in fmt_pos.columns]
+    ], use_container_width=True, hide_index=True)
 
 
 # ===============================
